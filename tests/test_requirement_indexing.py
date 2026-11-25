@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 from streamlit.testing.v1 import AppTest
 
-from core.graph_rag import GraphRAGEngine
+from core.graph_rag import GraphRAGEngine, IndexClearedError
 
 
 CONTENT = """# Requirements
@@ -119,6 +119,39 @@ class RequirementIndexingTests(unittest.TestCase):
             third = reloaded.add_requirements_from_text(CONTENT, source="ALLReq.md")
             self.assertEqual((third["added_count"], third["duplicate_count"], third["replaced_group_count"]), (0, 3, 0))
 
+    def test_clear_persists_and_old_session_cannot_restore_index(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch("core.graph_rag.OpenAI"),
+            patch.object(GraphRAGEngine, "extract_entities", return_value={}),
+            patch.object(GraphRAGEngine, "_embed_text", return_value=np.array([1.0, 0.0], dtype=np.float32)),
+        ):
+            root = Path(folder)
+            input_dir = root / "input"
+            storage = root / "store"
+            engine = GraphRAGEngine("test", "test", str(input_dir), "prompts", storage_path=str(storage))
+            engine.add_requirement("The system shall start correctly.")
+            other = GraphRAGEngine("test", "test", str(input_dir), "prompts", storage_path=str(storage))
+            input_file = input_dir / "original.md"
+            input_file.write_text("The system shall start correctly.", encoding="utf-8")
+
+            engine.clear_index()
+            self.assertEqual(engine.records, [])
+            self.assertIsNone(engine.index)
+            self.assertFalse((storage / "faiss.index").exists())
+            self.assertTrue(input_file.exists())
+            with self.assertRaises(IndexClearedError):
+                other.add_requirement("The system shall stop correctly.")
+            self.assertTrue(other.refresh_if_cleared())
+            self.assertEqual(other.records, [])
+            self.assertIsNone(other.index)
+            self.assertEqual(other.add_requirements_from_text("The system shall start correctly.")["added_count"], 1)
+
+            engine.clear_index()
+            restarted = GraphRAGEngine("test", "test", str(input_dir), "prompts", storage_path=str(storage))
+            self.assertEqual(len(restarted.records), 1)
+            self.assertEqual(restarted.records[0].text, "The system shall start correctly.")
+
 
 class IngestionSummaryTests(unittest.TestCase):
     def test_partial_failure_summary_remains_visible_after_rerun(self):
@@ -148,6 +181,33 @@ class IngestionSummaryTests(unittest.TestCase):
             self.assertTrue(any("parsed=2" in text.value and "failed=1" in text.value for text in app.markdown))
             self.assertTrue(any("could not be indexed" in warning.value for warning in app.warning))
             self.assertTrue(any("embedding failed" in text.value for text in app.markdown))
+            self.assertEqual(len(app.exception), 0)
+
+    def test_clear_requires_confirmation_and_keeps_api_session(self):
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        with (
+            patch("openai.OpenAI"),
+            patch("core.graph_rag.GraphRAGEngine") as engine_class,
+            patch("core.analyzer.ConflictAnalyzer"),
+            patch("core.ears_checker.EARSChecker"),
+        ):
+            engine = engine_class.return_value
+            engine.records = []
+            engine.build_mermaid_graph.return_value = "graph TD"
+            engine.refresh_if_cleared.return_value = False
+            app = AppTest.from_file(str(app_path)).run()
+            app.text_input[0].set_value("test-key")
+            app.button[0].click().run()
+
+            next(button for button in app.sidebar.button if button.label == "Clear previous indexing").click().run()
+            engine.clear_index.assert_not_called()
+            next(button for button in app.sidebar.button if button.label == "Cancel clear").click().run()
+            engine.clear_index.assert_not_called()
+            next(button for button in app.sidebar.button if button.label == "Clear previous indexing").click().run()
+            next(button for button in app.sidebar.button if button.label == "Confirm clear index").click().run()
+            engine.clear_index.assert_called_once()
+            self.assertTrue(any("Index cleared" in message.value for message in app.sidebar.success))
+            self.assertEqual(len(app.tabs), 5)
             self.assertEqual(len(app.exception), 0)
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import threading
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +14,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import faiss
 import numpy as np
 from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, OpenAI
+
+
+_storage_lock = threading.RLock()
+
+
+class IndexClearedError(RuntimeError):
+    """The index was cleared by another session."""
 
 
 @dataclass
@@ -57,11 +66,13 @@ class GraphRAGEngine:
         self.text_hashes: set[str] = set()
         self.embedding_dim: Optional[int] = None
         self.index: Optional[faiss.IndexFlatIP] = None
+        self.storage_generation = ""
 
         self.storage_path.mkdir(parents=True, exist_ok=True)
         self.input_folder.mkdir(parents=True, exist_ok=True)
 
-        self._load_persisted_state()
+        with _storage_lock:
+            self._load_persisted_state()
         self._ingest_input_folder()
         # Ensure local KB manifest exists even if no requirements were added yet.
         if not (self.storage_path / "records.json").exists():
@@ -115,7 +126,7 @@ class GraphRAGEngine:
                 model=self.embedding_model,
                 input=[text],
             )
-        except AuthenticationError:
+        except (AuthenticationError, IndexClearedError):
             raise
         except (APITimeoutError, APIConnectionError, APIError) as exc:
             if self.allow_local_embedding_fallback:
@@ -477,7 +488,47 @@ class GraphRAGEngine:
 
             self.add_requirements_from_text(content, source=file_path.name)
 
+    def _stored_generation(self) -> str:
+        meta_path = self.storage_path / "records.json"
+        if not meta_path.exists():
+            return ""
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            return payload.get("storage_generation", "")
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Cannot read the index state.") from exc
+
+    def refresh_if_cleared(self) -> bool:
+        """Reload state when another session has cleared the index."""
+        with _storage_lock:
+            if self._stored_generation() == self.storage_generation:
+                return False
+            self._load_persisted_state()
+            return True
+
+    def clear_index(self) -> None:
+        """Clear indexed data while leaving the input files untouched."""
+        with _storage_lock:
+            self.records = []
+            self.record_id_to_pos = {}
+            self.record_ids = []
+            self.graph_nodes = {}
+            self.graph_edges = []
+            self.record_embeddings = []
+            self.text_hashes = set()
+            self.embedding_dim = None
+            self.index = None
+            self.storage_generation = uuid.uuid4().hex
+            self._write_state()
+            (self.storage_path / "faiss.index").unlink(missing_ok=True)
+
     def _persist_state(self) -> None:
+        with _storage_lock:
+            if self._stored_generation() != self.storage_generation:
+                raise IndexClearedError("The index was cleared in another session.")
+            self._write_state()
+
+    def _write_state(self) -> None:
         meta_path = self.storage_path / "records.json"
         index_path = self.storage_path / "faiss.index"
 
@@ -488,6 +539,7 @@ class GraphRAGEngine:
             "record_ids": self.record_ids,
             "record_embeddings": self.record_embeddings,
             "embedding_dim": self.embedding_dim,
+            "storage_generation": self.storage_generation,
         }
         meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -518,10 +570,12 @@ class GraphRAGEngine:
         self.record_ids = payload.get("record_ids", [record.req_id for record in self.records])
         self.record_embeddings = payload.get("record_embeddings", [])
         self.embedding_dim = payload.get("embedding_dim")
+        self.storage_generation = payload.get("storage_generation", "")
+        self.index = None
         self.record_id_to_pos = {record.req_id: idx for idx, record in enumerate(self.records)}
         self.text_hashes = {record.text_hash for record in self.records}
 
-        if index_path.exists():
+        if self.records and index_path.exists():
             try:
                 self.index = faiss.read_index(str(index_path))
             except RuntimeError:

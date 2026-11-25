@@ -15,7 +15,7 @@ from openai import APIConnectionError, APIError, APITimeoutError, Authentication
 
 from core.analyzer import ConflictAnalyzer
 from core.ears_checker import EARSChecker
-from core.graph_rag import GraphRAGEngine
+from core.graph_rag import GraphRAGEngine, IndexClearedError
 
 
 load_dotenv()
@@ -37,8 +37,14 @@ def validate_api_key(api_key: str) -> None:
         client.close()
 
 
+def clear_results() -> None:
+    for key in ("last_requirement", "last_conflict_result", "last_ears_result", "chat_history", "ingestion_result"):
+        st.session_state.pop(key, None)
+
+
 def clear_session() -> None:
-    for key in ("services", "last_requirement", "last_conflict_result", "last_ears_result", "chat_history", "ingestion_result"):
+    clear_results()
+    for key in ("services", "confirm_clear_index", "index_cleared_message"):
         st.session_state.pop(key, None)
 
 
@@ -165,9 +171,39 @@ def main() -> None:
     prompts: Dict[str, str] = services["prompts"]  # type: ignore[assignment]
     input_folder: Path = services["input_folder"]  # type: ignore[assignment]
 
+    try:
+        if engine.refresh_if_cleared() is True:
+            clear_results()
+            st.warning("The shared index was cleared in another session.")
+    except RuntimeError as exc:
+        st.error(f"Could not check the shared index: {exc}")
+        st.stop()
+
     st.sidebar.header("Repository Overview")
     st.sidebar.write(f"Indexed requirements: {len(engine.records)}")
     st.sidebar.write(f"Input folder: {input_folder}")
+    if st.session_state.pop("index_cleared_message", False):
+        st.sidebar.success("Index cleared. Input files have not been deleted.")
+    if st.sidebar.button("Clear previous indexing"):
+        st.session_state.confirm_clear_index = True
+    if st.session_state.get("confirm_clear_index", False):
+        st.sidebar.warning(
+            "This clears the shared index for all users. Input files remain and are "
+            "automatically indexed again when a new session starts."
+        )
+        if st.sidebar.button("Confirm clear index"):
+            try:
+                engine.clear_index()
+            except (OSError, RuntimeError) as exc:
+                st.sidebar.error(f"Could not clear the index: {exc}")
+            else:
+                clear_results()
+                st.session_state.pop("confirm_clear_index", None)
+                st.session_state.index_cleared_message = True
+                st.rerun()
+        if st.sidebar.button("Cancel clear"):
+            st.session_state.pop("confirm_clear_index", None)
+            st.rerun()
     if st.sidebar.button("Change API key"):
         clear_session()
         st.rerun()
@@ -264,7 +300,7 @@ def main() -> None:
                         if result["added_count"]:
                             store_requirement(input_folder, new_requirement)
                         st.session_state.ingestion_result = result
-                    except AuthenticationError:
+                    except (AuthenticationError, IndexClearedError):
                         raise
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Failed to add requirement: {exc}")
@@ -338,6 +374,11 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except IndexClearedError:
+        st.session_state.services["engine"].refresh_if_cleared()
+        clear_results()
+        st.session_state.index_cleared_message = True
+        st.rerun()
     except AuthenticationError:
         clear_session()
         st.session_state.auth_error = "OpenAI rejected your API key. Please enter a valid key."

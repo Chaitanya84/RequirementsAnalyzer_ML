@@ -74,6 +74,7 @@ streamlit run app.py
 - Use **New Requirement** to upload or paste a new requirement.
 - Run **Analyze Requirement** to generate conflict and EARS outputs.
 - Use **Add Requirement to Knowledge Base** to persist and index the requirement.
+- Use **Clear previous indexing** in the sidebar and confirm to clear the shared index and graph. Input files are not deleted and will be indexed again when a new session starts.
 - Review **Conflict Report** and **EARS Validation** tabs.
 - Ask contextual questions in **Requirement Q&A**.
 - Inspect graph topology in **Relational Graph**.
