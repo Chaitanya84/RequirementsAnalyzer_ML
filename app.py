@@ -11,6 +11,7 @@ from typing import Dict, List
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
+from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, OpenAI
 
 from core.analyzer import ConflictAnalyzer
 from core.ears_checker import EARSChecker
@@ -26,11 +27,24 @@ def read_prompt(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-@st.cache_resource
-def init_services() -> Dict[str, object]:
-    """Initializes core app services once per Streamlit process."""
+def validate_api_key(api_key: str) -> None:
+    """Verify the key with OpenAI before initializing any app services."""
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    client = OpenAI(api_key=api_key, timeout=10.0, max_retries=0)
+    try:
+        client.models.list()
+    finally:
+        client.close()
+
+
+def clear_session() -> None:
+    for key in ("services", "last_requirement", "last_conflict_result", "last_ears_result", "chat_history"):
+        st.session_state.pop(key, None)
+
+
+def init_services(api_key: str) -> Dict[str, object]:
+    """Initializes core app services for one Streamlit session."""
+
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
     input_folder = os.getenv("INPUT_FOLDER_PATH", "input").strip()
     allow_fallback = os.getenv("ALLOW_LOCAL_EMBEDDING_FALLBACK", "true").strip().lower() in {
@@ -39,9 +53,6 @@ def init_services() -> Dict[str, object]:
         "yes",
         "on",
     }
-
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured in .env")
 
     prompt_dir = Path("prompts")
     engine = GraphRAGEngine(
@@ -123,12 +134,31 @@ def main() -> None:
     st.title("AI-Assisted Requirement Analysis Tool")
     st.caption("GraphRAG + FAISS + OpenAI for conflict detection, EARS validation, and Q&A")
 
-    try:
-        services = init_services()
-    except RuntimeError as exc:
-        st.error(str(exc))
+    if "services" not in st.session_state:
+        auth_error = st.session_state.pop("auth_error", None)
+        if auth_error:
+            st.error(auth_error)
+        with st.form("api_key_form"):
+            api_key = st.text_input("OpenAI API key", type="password")
+            submitted = st.form_submit_button("Continue", type="primary")
+        if submitted:
+            if not api_key.strip():
+                st.error("Enter your OpenAI API key to continue.")
+            else:
+                try:
+                    validate_api_key(api_key.strip())
+                    st.session_state.services = init_services(api_key.strip())
+                except AuthenticationError:
+                    st.error("OpenAI rejected this API key. Please check it and try again.")
+                except (APITimeoutError, APIConnectionError, APIError):
+                    st.error("Could not verify the API key with OpenAI. Please try again.")
+                except RuntimeError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
         st.stop()
 
+    services = st.session_state.services
     engine: GraphRAGEngine = services["engine"]  # type: ignore[assignment]
     conflict_analyzer: ConflictAnalyzer = services["conflict_analyzer"]  # type: ignore[assignment]
     ears_checker: EARSChecker = services["ears_checker"]  # type: ignore[assignment]
@@ -138,6 +168,9 @@ def main() -> None:
     st.sidebar.header("Repository Overview")
     st.sidebar.write(f"Indexed requirements: {len(engine.records)}")
     st.sidebar.write(f"Input folder: {input_folder}")
+    if st.sidebar.button("Change API key"):
+        clear_session()
+        st.rerun()
 
     if "last_requirement" not in st.session_state:
         st.session_state.last_requirement = ""
@@ -243,6 +276,8 @@ def main() -> None:
                             with st.expander("Ingestion errors"):
                                 for err in result["errors"]:
                                     st.write(f"- {err}")
+                    except AuthenticationError:
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Failed to add requirement: {exc}")
                     else:
@@ -313,4 +348,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except AuthenticationError:
+        clear_session()
+        st.session_state.auth_error = "OpenAI rejected your API key. Please enter a valid key."
+        st.rerun()

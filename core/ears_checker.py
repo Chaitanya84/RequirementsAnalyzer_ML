@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Dict, List, Tuple
 
-from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, OpenAI
 
 
 class EARSChecker:
@@ -102,6 +102,8 @@ class EARSChecker:
                 temperature=0.1,
             )
             ai_result = self._extract_json_object(response.choices[0].message.content or "{}")
+        except AuthenticationError:
+            raise
         except (APITimeoutError, APIConnectionError, APIError) as exc:
             ai_result = {
                 "is_valid": regex_result["is_valid"],

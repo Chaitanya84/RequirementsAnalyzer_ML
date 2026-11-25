@@ -51,10 +51,9 @@ pip install -r requirements.txt
 
 ## Environment Variables
 
-Create/update `.env` with:
+Optionally create/update `.env` with:
 
 ```env
-OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-4o-mini
 INPUT_FOLDER_PATH=input
 ```
@@ -68,13 +67,27 @@ INPUT_FOLDER_PATH=input
 streamlit run app.py
 ```
 
-3. In the UI:
+3. Enter your OpenAI API key in the password field and select **Continue**.
+   The key is used by clients in your Streamlit session, not stored in the repository.
+   Use **Change API key** in the sidebar to return to the key entry screen.
+4. In the UI:
 - Use **New Requirement** to upload or paste a new requirement.
 - Run **Analyze Requirement** to generate conflict and EARS outputs.
 - Use **Add Requirement to Knowledge Base** to persist and index the requirement.
 - Review **Conflict Report** and **EARS Validation** tabs.
 - Ask contextual questions in **Requirement Q&A**.
 - Inspect graph topology in **Relational Graph**.
+
+## Deploy to Render
+
+1. Push this repository to GitHub.
+2. In Render, choose **New +** → **Blueprint** and select the repository. Render will read `render.yaml` and create the web service.
+3. Wait for the first deploy to finish, then open the service URL.
+4. Enter your own OpenAI API key in the app. No API key needs to be configured in Render.
+
+The Blueprint installs dependencies from `requirements.txt` and starts Streamlit on Render's assigned port. Keys are held by the server in memory for each session and are sent to OpenAI for API calls; use only a deployment you trust. Before opening the app, the server verifies the key using OpenAI's models endpoint; the key must have access to that endpoint. If OpenAI later rejects the key, the session returns to the key entry screen.
+
+The knowledge base is shared across users of the same deployment, not private to each session. Do not upload sensitive requirements to a public deployment. The local FAISS index and uploaded requirements are not persistent on Render's free service, so added data may be lost when the service restarts or redeploys.
 
 ## GraphRAG Technical Summary
 
@@ -108,7 +121,7 @@ streamlit run app.py
 - Index and metadata are persisted locally under `vector_store/`.
 
 ## Security
-- No API keys are hardcoded.
+- No API keys are hardcoded; each user provides one in the UI.
 - `.env` is ignored by Git.
 - Local requirement files in `input/` are ignored by Git.
 

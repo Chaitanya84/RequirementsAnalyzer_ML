@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Dict, List
 
-from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, OpenAI
 
 from .graph_rag import GraphRAGEngine
 
@@ -104,6 +104,8 @@ class ConflictAnalyzer:
                 temperature=0.1,
             )
             ai_payload = self._extract_json_object(response.choices[0].message.content or "{}")
+        except AuthenticationError:
+            raise
         except (APITimeoutError, APIConnectionError, APIError) as exc:
             ai_payload = {
                 "conflicts": [],

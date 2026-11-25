@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import faiss
 import numpy as np
-from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError, OpenAI
 
 
 @dataclass
@@ -81,6 +81,8 @@ class GraphRAGEngine:
                 ],
                 temperature=0.1,
             )
+        except AuthenticationError:
+            raise
         except (APITimeoutError, APIConnectionError, APIError) as exc:
             raise RuntimeError(f"OpenAI request failed: {exc}") from exc
 
@@ -113,6 +115,8 @@ class GraphRAGEngine:
                 model=self.embedding_model,
                 input=[text],
             )
+        except AuthenticationError:
+            raise
         except (APITimeoutError, APIConnectionError, APIError) as exc:
             if self.allow_local_embedding_fallback:
                 fallback_dim = self.index.d if self.index is not None else (self.embedding_dim or 256)
@@ -376,6 +380,8 @@ class GraphRAGEngine:
                     duplicate_count += 1
                     continue
                 added_records.append(record)
+            except AuthenticationError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 failed_count += 1
                 errors.append(f"item {index}: {exc}")
@@ -658,6 +664,8 @@ class GraphRAGEngine:
                 ],
                 temperature=0.2,
             )
+        except AuthenticationError:
+            raise
         except (APITimeoutError, APIConnectionError, APIError) as exc:
             return f"Unable to answer right now due to API error: {exc}"
 
