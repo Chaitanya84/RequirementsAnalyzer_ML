@@ -284,10 +284,37 @@ class GraphRAGEngine:
 
         return requirements
 
+    def _extract_markdown_list_requirements(self, content: str) -> List[Tuple[Optional[str], str]]:
+        pattern = re.compile(
+            r"^\s*(?:[-*+]|\d+[.)])\s+(?:\*\*)?"
+            r"(?P<id>(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9-]+)"
+            r"(?:\*\*)?:(?:\*\*)?\s*(?P<text>\S.*)$"
+        )
+        requirements: List[Tuple[Optional[str], str]] = []
+        current_id: Optional[str] = None
+        current_lines: List[str] = []
+        for line in content.splitlines():
+            match = pattern.match(line)
+            if match:
+                if current_id is not None:
+                    requirements.append((current_id, self._normalize_requirement_text(" ".join(current_lines))))
+                current_id = match.group("id")
+                current_lines = [match.group("text")]
+            elif current_id is not None and re.match(r"^\s{2,}\S", line) and not re.match(r"^\s*[-*+]\s", line):
+                current_lines.append(line.strip())
+            elif current_id is not None:
+                requirements.append((current_id, self._normalize_requirement_text(" ".join(current_lines))))
+                current_id = None
+                current_lines = []
+        if current_id is not None:
+            requirements.append((current_id, self._normalize_requirement_text(" ".join(current_lines))))
+        return requirements
+
     def _extract_requirements(self, content: str) -> List[Tuple[Optional[str], str]]:
+        markdown_list = self._extract_markdown_list_requirements(content)
         markdown_rows = self._extract_markdown_table_requirements(content)
-        if markdown_rows:
-            return markdown_rows
+        if markdown_list or markdown_rows:
+            return markdown_list + markdown_rows
 
         paragraphs = [
             p.strip()
@@ -305,7 +332,47 @@ class GraphRAGEngine:
         return [(None, self._normalize_requirement_text(chunk)) for chunk in self._split_requirements(content)]
 
     def _next_requirement_id(self) -> str:
-        return f"REQ-{len(self.records) + 1:04d}"
+        used_ids = set(self.record_id_to_pos)
+        next_id = len(self.records) + 1
+        while f"REQ-{next_id:04d}" in used_ids:
+            next_id += 1
+        return f"REQ-{next_id:04d}"
+
+    def _remove_replaced_groups(self, content: str) -> int:
+        replaced_hashes = set()
+        for paragraph in re.split(r"\n\s*\n", content):
+            entries = self._extract_markdown_list_requirements(paragraph)
+            if entries and all(self._text_hash(text) in self.text_hashes for _, text in entries):
+                replaced_hashes.add(self._text_hash(paragraph))
+
+        keep = [i for i, record in enumerate(self.records) if record.text_hash not in replaced_hashes]
+        removed = len(self.records) - len(keep)
+        if not removed:
+            return 0
+        if len(self.record_embeddings) != len(self.records) or not keep:
+            raise RuntimeError("Cannot safely rebuild the index: stored embeddings are incomplete.")
+
+        records = [self.records[i] for i in keep]
+        embeddings = [self.record_embeddings[i] for i in keep]
+        vectors = np.asarray(embeddings, dtype=np.float32)
+        if vectors.ndim != 2 or not vectors.shape[1]:
+            raise RuntimeError("Cannot safely rebuild the index: stored embeddings are invalid.")
+        index = faiss.IndexFlatIP(vectors.shape[1])
+        index.add(vectors)
+
+        self.records = records
+        self.record_embeddings = embeddings
+        self.record_ids = [record.req_id for record in records]
+        self.record_id_to_pos = {record.req_id: i for i, record in enumerate(records)}
+        self.text_hashes = {record.text_hash for record in records}
+        self.embedding_dim = vectors.shape[1]
+        self.index = index
+        self.graph_nodes = {}
+        self.graph_edges = []
+        for record in records:
+            self._register_graph_for_requirement(record)
+        self._persist_state()
+        return removed
 
     def add_requirement(
         self,
@@ -386,11 +453,13 @@ class GraphRAGEngine:
                 failed_count += 1
                 errors.append(f"item {index}: {exc}")
 
+        replaced_count = self._remove_replaced_groups(content)
         return {
             "parsed_count": len(parsed_requirements),
             "added_count": len(added_records),
             "duplicate_count": duplicate_count,
             "failed_count": failed_count,
+            "replaced_group_count": replaced_count,
             "errors": errors,
             "records": added_records,
         }

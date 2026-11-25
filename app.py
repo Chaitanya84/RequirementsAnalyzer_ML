@@ -38,7 +38,7 @@ def validate_api_key(api_key: str) -> None:
 
 
 def clear_session() -> None:
-    for key in ("services", "last_requirement", "last_conflict_result", "last_ears_result", "chat_history"):
+    for key in ("services", "last_requirement", "last_conflict_result", "last_ears_result", "chat_history", "ingestion_result"):
         st.session_state.pop(key, None)
 
 
@@ -193,6 +193,25 @@ def main() -> None:
 
     with tabs[0]:
         st.subheader("Submit New Requirement")
+        if "ingestion_result" in st.session_state:
+            result = st.session_state.ingestion_result
+            st.write(
+                "Ingestion summary: "
+                f"parsed={result['parsed_count']}, "
+                f"added={result['added_count']}, "
+                f"duplicates={result['duplicate_count']}, "
+                f"failed={result['failed_count']}, "
+                f"replaced old groups={result['replaced_group_count']}"
+            )
+            if result["errors"]:
+                st.warning("Some requirements could not be indexed. Retry the upload after checking the errors.")
+                with st.expander("Ingestion errors"):
+                    for err in result["errors"]:
+                        st.write(f"- {err}")
+            elif result["added_count"]:
+                st.success("Requirements added to the knowledge base.")
+            else:
+                st.info("No new requirements were added.")
         uploaded_file = st.file_uploader(
             "Upload a requirement file (.txt or .md)",
             type=["txt", "md"],
@@ -242,40 +261,9 @@ def main() -> None:
                             new_requirement,
                             source=source_label,
                         )
-
-                        if result["added_count"] == 0:
-                            st.info(
-                                "No new requirement was added. Uploaded content is already indexed "
-                                "or failed to embed."
-                            )
-                        else:
-                            file_path, created = store_requirement(input_folder, new_requirement)
-                            if created:
-                                st.success(
-                                    "Added "
-                                    f"{result['added_count']} requirement(s) "
-                                    f"from {result['parsed_count']} parsed and stored "
-                                    f"snapshot in {file_path.name}."
-                                )
-                            else:
-                                st.success(
-                                    "Added "
-                                    f"{result['added_count']} requirement(s). "
-                                    f"Snapshot already exists as {file_path.name}."
-                                )
-
-                        st.write(
-                            "Ingestion summary: "
-                            f"parsed={result['parsed_count']}, "
-                            f"added={result['added_count']}, "
-                            f"duplicates={result['duplicate_count']}, "
-                            f"failed={result.get('failed_count', 0)}"
-                        )
-
-                        if result.get("errors"):
-                            with st.expander("Ingestion errors"):
-                                for err in result["errors"]:
-                                    st.write(f"- {err}")
+                        if result["added_count"]:
+                            store_requirement(input_folder, new_requirement)
+                        st.session_state.ingestion_result = result
                     except AuthenticationError:
                         raise
                     except Exception as exc:  # noqa: BLE001

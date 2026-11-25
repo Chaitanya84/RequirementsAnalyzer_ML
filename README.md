@@ -97,6 +97,8 @@ The knowledge base is shared across users of the same deployment, not private to
 - For each requirement, it performs entity extraction (`systems`, `users`, `actions`, `constraints`, `relationships`).
 - Requirement text embeddings are generated with OpenAI and normalized.
 - Embeddings are indexed in local FAISS (`IndexFlatIP`) for cosine-style retrieval.
+- Markdown list entries such as `* **CR-001:** The system shall ...` are indexed individually, preserving their IDs.
+- Re-uploading a document replaces old grouped records only after every requirement in each group has been indexed. Check the ingestion summary for failures and retry if needed. Indexing can make an OpenAI request for each requirement and incur API costs.
 
 ### Graph Construction
 - Every requirement is represented as a requirement node.
